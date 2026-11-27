@@ -1,0 +1,47 @@
+<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>CU7100 Ambilight</title>
+<style>body{background:#131720;color:#fff;font:32px sans-serif;margin:7%}input{font:inherit;width:14em}button{font:inherit;padding:.45em .9em;margin-right:.5em}button:focus{outline:6px solid #95c9ff}pre{font:24px monospace;white-space:pre-wrap}</style>
+<h1>CU7100 Ambilight</h1><p id="status">Подключение к службе…</p>
+<p><label>IPv4 приёмника <input id="receiver" type="text" inputmode="decimal" autocomplete="off"></label></p>
+<button id="start">Запустить</button><button id="stop">Остановить</button><pre id="details"></pre>
+<script>
+var field = document.getElementById('receiver');
+try { field.value = localStorage.getItem('cu7100.receiver') || ''; } catch (e) {}
+if (!field.value) field.focus();
+function request(action) {
+    var xhr = new XMLHttpRequest();
+    xhr.open(action === 'status' ? 'GET' : 'POST', 'http://127.0.0.1:28663/' + action);
+    if (action !== 'status') xhr.setRequestHeader('X-Ambilight', '1');
+    if (action === 'start') xhr.setRequestHeader('X-Receiver', field.value.trim());
+    xhr.timeout = 1800;
+    xhr.onload = function () {
+        if (xhr.status !== 200) {
+            document.getElementById('details').textContent = xhr.status === 400 ? 'Введи локальный IPv4-адрес сервера.' : 'Ошибка ' + xhr.status;
+            return;
+        }
+        if (action === 'start') {
+            try { localStorage.setItem('cu7100.receiver', field.value.trim()); } catch (e) {}
+        }
+        var data = JSON.parse(xhr.responseText);
+        document.getElementById('status').textContent = data.state;
+        document.getElementById('details').textContent = data.detail;
+    };
+    xhr.ontimeout = xhr.onerror = function () {
+        document.getElementById('status').textContent = 'Служба захвата не отвечает';
+    };
+    xhr.send();
+}
+document.getElementById('start').onclick = function () { request('start'); };
+document.getElementById('stop').onclick = function () { request('stop'); };
+document.onkeydown = function (e) {
+    if (e.keyCode === 38) { field.focus(); return; }
+    if (e.keyCode === 40 || (e.keyCode === 13 && document.activeElement === field)) {
+        document.getElementById('start').focus(); return;
+    }
+    if (document.activeElement !== field && (e.keyCode === 37 || e.keyCode === 39)) {
+        document.getElementById(e.keyCode === 37 ? 'start' : 'stop').focus();
+    }
+};
+request('status');
+setInterval(function () { request('status'); }, 2500);
+</script></html>
