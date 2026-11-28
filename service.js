@@ -78,7 +78,7 @@
 
     var api = http.createServer(function (req, res) {
         var origin = req.headers.origin;
-        if (origin && origin !== 'http://127.0.0.1:8081') { res.writeHead(403); return res.end(); }
+        if (origin && origin !== 'http://127.0.0.1:8081' && origin !== 'http://localhost:8081') { res.writeHead(403); return res.end(); }
         if (origin) {
             res.setHeader('Access-Control-Allow-Origin', origin);
         }
