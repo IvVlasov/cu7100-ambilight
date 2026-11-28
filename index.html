@@ -9,36 +9,67 @@ var field = document.getElementById('receiver');
 try { field.value = localStorage.getItem('cu7100.receiver') || ''; } catch (e) {}
 var startWhenReady = true;
 var serviceHost = '127.0.0.1';
-var serviceReport = '';
-var lastProbe = 0;
 
-function inspectService() {
-    if (Date.now() - lastProbe < 10000) return;
-    lastProbe = Date.now();
-    // Read the module status from TizenBrew on the television.
-    var socket = new WebSocket('ws://localhost:8081');
-    var timer = setTimeout(function () { socket.close(); }, 3500);
-    socket.onopen = function () { socket.send(JSON.stringify({type: 7})); };
-    socket.onmessage = function (event) {
-        var msg = JSON.parse(event.data);
-        if (msg.type !== 7 || !Array.isArray(msg.payload)) return;
-        var moduleName = decodeURIComponent(location.pathname.split('/')[2] || '');
-        var service = msg.payload.filter(function (item) { return item.name === moduleName; })[0];
-        if (!service) serviceReport = 'TizenBrew не зарегистрировал фоновую службу для этого модуля.';
-        else if (service.hasCrashed) {
-            var error = service.error || {};
-            serviceReport = 'TizenBrew сообщает об ошибке запуска: ' +
-                (error.message || error.code || (typeof error === 'string' && error) || 'без пояснения');
-        } else serviceReport = 'TizenBrew загрузил службу, но её локальный HTTP-интерфейс недоступен.';
-        document.getElementById('details').textContent = serviceReport;
-        socket.close();
-    };
-    socket.onclose = function () { clearTimeout(timer); };
-    socket.onerror = function () {
-        serviceReport = 'Недоступна также служба TizenBrew на localhost:8081.';
-        document.getElementById('details').textContent = serviceReport;
-    };
+var replyPort;
+var startedByUser = false;
+var lastDiagnostic = '';
+var portError = '';
+
+function announce(code) {
+    if (!startedByUser || lastDiagnostic === code) return;
+    var ip = field.value.trim();
+    if (!/^(?:10\.|192\.168\.|172\.(?:1[6-9]|2[0-9]|3[01])\.)/.test(ip) ||
+        !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(ip) ||
+        ip.split('.').some(function (part) { return Number(part) > 255; })) return;
+    lastDiagnostic = code;
+    try {
+        var ping = new XMLHttpRequest();
+        ping.open('POST', 'http://' + ip + ':26470/cu7100-ui/' + code);
+        ping.timeout = 1500;
+        ping.send();
+    } catch (error) { /* Diagnostics are optional on restricted web runtimes. */ }
 }
+function showResult(action, code, data) {
+    if (code !== 200) {
+        document.getElementById('details').textContent = code === 400 ? 'Введи локальный IPv4-адрес сервера.' : 'Ошибка ' + code;
+        return;
+    }
+    if (action === 'start') {
+        try { localStorage.setItem('cu7100.receiver', field.value.trim()); } catch (e) {}
+    }
+    document.getElementById('status').textContent = data.state;
+    document.getElementById('details').textContent = data.detail;
+    if (action === 'status' && startWhenReady && field.value) {
+        startWhenReady = false;
+        request('start');
+    }
+}
+
+function nativeRequest(action) {
+    try {
+        if (!replyPort) {
+            var local = tizen.messageport.requestTrustedLocalMessagePort('CU7100_UI_V3');
+            local.addMessagePortListener(function (items) {
+                items.forEach(function (item) {
+                    if (item.key !== 'result') return;
+                    var result = JSON.parse(item.value);
+                    lastPortResponse = Date.now();
+                    announce('native-reply');
+                    showResult(result.action, result.code, result);
+                });
+            });
+            replyPort = local;
+        }
+        var serviceId = tizen.application.getCurrentApplication().appInfo.packageId + '.StandaloneService';
+        var remote = tizen.messageport.requestTrustedRemoteMessagePort(serviceId, 'CU7100_CAPTURE_V3');
+        remote.sendMessage([{key: 'action', value: action}, {key: 'receiver', value: field.value.trim()}], replyPort);
+        return true;
+    } catch (error) {
+        portError = error.name || 'Error';
+        return false;
+    }
+}
+var lastPortResponse = 0;
 function readReceiver() {
     if (field.value) return;
     var socket = new WebSocket('ws://127.0.0.1:8086');
@@ -59,8 +90,21 @@ function readReceiver() {
     };
     socket.onclose = function () { clearTimeout(timer); };
 }
-readReceiver();
-function request(action, alternate) {
+try { readReceiver(); } catch (error) { /* The receiver can also be entered manually. */ }
+function request(action) {
+    var sent = Date.now();
+    if (nativeRequest(action)) {
+        setTimeout(function () {
+            if (lastPortResponse < sent) {
+                announce('native-timeout');
+                document.getElementById('details').textContent = 'Tizen передал команду. Ответа службы пока нет.';
+            }
+        }, 1800);
+        return;
+    }
+    httpRequest(action);
+}
+function httpRequest(action, alternate) {
     var xhr = new XMLHttpRequest();
     var host = alternate ? (serviceHost === 'localhost' ? '127.0.0.1' : 'localhost') : serviceHost;
     xhr.open(action === 'status' ? 'GET' : 'POST', 'http://' + host + ':28663/' + action);
@@ -68,32 +112,21 @@ function request(action, alternate) {
     if (action === 'start') xhr.setRequestHeader('X-Receiver', field.value.trim());
     xhr.timeout = 1800;
     xhr.onload = function () {
-        if (xhr.status !== 200) {
-            document.getElementById('details').textContent = xhr.status === 400 ? 'Введи локальный IPv4-адрес сервера.' : 'Ошибка ' + xhr.status;
-            return;
-        }
         serviceHost = host;
-        serviceReport = '';
-        if (action === 'start') {
-            try { localStorage.setItem('cu7100.receiver', field.value.trim()); } catch (e) {}
-        }
-        var data = JSON.parse(xhr.responseText);
-        document.getElementById('status').textContent = data.state;
-        document.getElementById('details').textContent = data.detail;
-        if (action === 'status' && startWhenReady && field.value) {
-            startWhenReady = false;
-            request('start');
-        }
+        announce('http-reply');
+        showResult(action, xhr.status, xhr.status === 200 ? JSON.parse(xhr.responseText) : {});
     };
     xhr.ontimeout = xhr.onerror = function () {
-        if (action === 'status' && !alternate) { request(action, true); return; }
-        document.getElementById('status').textContent = 'Нет ответа локальной службы захвата';
-        if (serviceReport) document.getElementById('details').textContent = serviceReport;
-        inspectService();
+        if (action === 'status' && !alternate) { httpRequest(action, true); return; }
+        announce(portError === 'NotFoundError' ? 'native-port-missing' :
+            portError === 'InvalidAccessError' || portError === 'SecurityError' ? 'native-access-denied' :
+            portError === 'ReferenceError' || portError === 'TypeError' ? 'native-api-unavailable' : 'native-error');
+        document.getElementById('status').textContent = 'Служба захвата недоступна';
+        document.getElementById('details').textContent = 'Tizen MessagePort: ' + portError;
     };
     xhr.send();
 }
-document.getElementById('start').onclick = function () { startWhenReady = false; request('start'); };
+document.getElementById('start').onclick = function () { startedByUser = true; lastDiagnostic = ''; announce('start-clicked'); startWhenReady = false; request('start'); };
 document.getElementById('stop').onclick = function () { startWhenReady = false; request('stop'); };
 document.onkeydown = function (e) {
     if (e.keyCode === 38) { field.focus(); return; }

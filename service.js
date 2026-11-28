@@ -1,7 +1,6 @@
 // The service runs with the permissions of the TV application.
 (function () {
     'use strict';
-    var http = require('http');
     var child = null;
     var state = 'Ожидание';
     var diagnostic = '';
@@ -76,7 +75,37 @@
         state = 'Остановлено';
     }
 
-    var api = http.createServer(function (req, res) {
+    function control(action, address) {
+        if (action === 'stop') stop();
+        else if (action === 'start') {
+            if (!isLanAddress(address)) return 400;
+            if (child && address !== serverAddress) return 409;
+            serverAddress = address;
+            clearTimeout(retry);
+            active = true;
+            attempts = 0;
+            start();
+        } else if (action !== 'status') return 404;
+        return 200;
+    }
+
+    // Both endpoints belong to the same signed TizenBrew widget.
+    try {
+        var port = tizen.messageport.requestTrustedLocalMessagePort('CU7100_CAPTURE_V3');
+        port.addMessagePortListener(function (items, reply) {
+            if (!reply || !reply.isTrusted) return;
+            var args = {};
+            items.forEach(function (item) {
+                if (item.key === 'action' || item.key === 'receiver') args[item.key] = item.value;
+            });
+            var code = control(args.action, args.receiver || '');
+            reply.sendMessage([{key: 'result', value: JSON.stringify({
+                code: code, state: state, detail: diagnostic, action: args.action
+            })}]);
+        });
+    } catch (error) { console.log('Ambilight MessagePort: ' + error.message); }
+
+    var api = require('http').createServer(function (req, res) {
         var origin = req.headers.origin;
         if (origin && origin !== 'http://127.0.0.1:8081' && origin !== 'http://localhost:8081') { res.writeHead(403); return res.end(); }
         if (origin) {
@@ -87,17 +116,8 @@
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
         if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
         if (req.method === 'POST' && req.headers['x-ambilight'] === '1') {
-            if (req.url === '/stop') stop();
-            else if (req.url === '/start') {
-                var address = req.headers['x-receiver'] || '';
-                if (!isLanAddress(address)) { res.writeHead(400); return res.end(); }
-                if (child && address !== serverAddress) { res.writeHead(409); return res.end(); }
-                serverAddress = address;
-                clearTimeout(retry);
-                active = true;
-                attempts = 0;
-                start();
-            } else { res.writeHead(404); return res.end(); }
+            var code = control(req.url.slice(1), req.headers['x-receiver'] || '');
+            if (code !== 200) { res.writeHead(code); return res.end(); }
         } else if (req.method !== 'GET' || req.url !== '/status') {
             res.writeHead(404);
             return res.end();
